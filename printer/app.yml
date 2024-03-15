@@ -1,0 +1,18 @@
+version: '2'
+
+services:
+    app:
+        privileged: true
+        build: .
+        volumes:
+          - ./data:/data:rw
+          - ./config:/config:ro
+          - ./code:/code:rw
+          - /run/udev:/run/udev:ro
+          - /dev/bus/usb:/dev/bus/usb
+        devices:
+          - /dev/bus/usb:/dev/bus/usb
+        cap_add:
+          - SYS_ADMIN
+        ports:
+          - "1880:1880" 

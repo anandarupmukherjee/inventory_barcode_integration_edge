@@ -1,0 +1,47 @@
+version: '2'
+
+services:
+    user-input-dc:
+        extends:
+            file: user_input_dc/app.yml
+            service: app
+        networks:
+            internal: 
+                aliases: 
+                    - user-input-dc.docker.local
+        logging: 
+            driver: syslog
+            options: 
+                tag: docker-user-input-dc
+    # mqtt_broker:
+    #         extends:
+    #             file: mqtt_broker/app.yml
+    #             service: app
+    #         networks:
+    #             internal:
+    #                 aliases:
+    #                     - mqtt.docker.local
+    #         logging:
+    #                 driver: syslog
+    #                 options:
+    #                         tag: docker-mqtt-broker
+    #         restart: unless-stopped
+    printer:
+        extends:
+            file: printer/app.yml
+            service: app
+        networks:
+            internal:
+                aliases:
+                    - printer.docker.local
+        logging:
+            driver: syslog
+            options:
+                tag: docker-printer
+        restart: unless-stopped    
+networks:
+        internal:
+            name: ManualLab
+            external: true
+
+
