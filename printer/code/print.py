@@ -1,230 +1,318 @@
+#!/usr/bin/env python3
+import os
+import sys
+import json
+import time
+from pathlib import Path
+
 import barcode
-from barcode import EAN13, Code128
 from barcode.writer import ImageWriter
-from io import BytesIO
+from PIL import Image, ImageDraw, ImageFont
+
+# --- Pillow 10 compat: reintroduce Image.ANTIALIAS constant if missing ---
+try:
+    _ = Image.ANTIALIAS
+except AttributeError:
+    if hasattr(Image, "Resampling"):
+        Image.ANTIALIAS = Image.Resampling.LANCZOS  # type: ignore
+    elif hasattr(Image, "LANCZOS"):
+        Image.ANTIALIAS = Image.LANCZOS  # type: ignore
+
 import brother_ql
 from brother_ql.raster import BrotherQLRaster
 from brother_ql.backends.helpers import send
-import os
-import time
-import datetime
-from PIL import Image, ImageDraw, ImageFont
-import sys
-import json
-import usb.core
-import usb.util
-import QRPrint
-import math
-import qrcode
-import base64
-import zlib
 
+import QRPrint  # expects /code/QRPrint.py
 
-def find_brother_ql_printer():
-    # Search for the Brother QL printer by its vendor and product ID
-    dev = usb.core.find(idVendor=0x04f9, idProduct=0x209b)
+# ----------------------------
+# Configuration (via env vars)
+# ----------------------------
+MODEL = os.getenv("PRINTER_MODEL", "QL-700")
+TAPE = os.getenv("PRINTER_TAPE", "62")  # DK-62mm continuous
+IDENTIFIER = os.getenv("PRINTER_IDENTIFIER", "usb://0x04f9:0x2042")  # your QL-700 VID:PID
+QR_OVERLAY_TEXT = os.getenv("QR_OVERLAY_TEXT", "Digital Hospitals").strip()
+# Note: we DON'T pass backend kwarg to send(); usb:// implies pyusb backend in your install.
 
-    if dev is None:
-        raise ValueError("Brother QL printer not found!")
+# Paths (match your mounted /code)
+BASE = Path(os.getenv("CODE_BASE", "/code"))
+BARCODES_DIR = BASE / "barcodes"
+QR_DIR = BASE / "QR"
+OUTPUT_DIR = BASE / "output"
+FONTS_DIR = BASE / "fonts"
+FONT_PATH = FONTS_DIR / "DejaVuSans-Bold.ttf"
 
-    return dev
+# QL-700 62mm tape raster width in pixels (approx 696 px)
+MAX_LABEL_WIDTH = 696
 
-def sendToPrinter(path):
-    ## Printer Set-up
-    
-    # ~ dev = find_brother_ql_printer()
-    # ~ print(dev)
-    
-    
-    PRINTER_IDENTIFIER = '/dev/usb/lp5'    
-    printer = BrotherQLRaster('QL-700')
+def ensure_dirs():
+    for p in [BARCODES_DIR, QR_DIR, OUTPUT_DIR]:
+        p.mkdir(parents=True, exist_ok=True)
 
+def log(msg: str):
+    print(f"[print.py] {msg}", flush=True)
 
-    print_data = brother_ql.brother_ql_create.convert(printer, [path], '62', dither=True)
-    
-    print(f'Print Data')
-    print(path)
+# -------------------------
+# Image / label construction
+# -------------------------
+def create_barcode(id_str: str, output_stem: Path):
+    opts = dict(
+        module_height=10,
+        quiet_zone=5,
+        font_size=10,
+        text_distance=1,
+        background="white",
+        foreground="black",
+        center_text=False,
+        format="PNG",
+    )
+    BC = barcode.get_barcode_class("code128")
+    BC(str(id_str), writer=ImageWriter()).save(str(output_stem), opts)
+
+def create_qr_text(value: str, output_stem: Path):
+    qr = QRPrint.QRPrint()
+    qr.makeLabelQR(value, str(output_stem) + ".png")
+
+def overlay_text_on_qr(image: Image.Image, text: str) -> Image.Image:
+    text = (text or "").strip()
+    if not text:
+        return image
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+
     try:
-        send(print_data, PRINTER_IDENTIFIER)
-    except:
-        print("error printing")
+        font_size = max(12, int(image.width * 0.08))
+        font = ImageFont.truetype(str(FONT_PATH), font_size)
+    except Exception:
+        font = ImageFont.load_default()
+        font_size = getattr(font, 'size', 12)
 
+    dummy = Image.new("RGB", (image.width, image.height), "white")
+    drawer = ImageDraw.Draw(dummy)
+    if hasattr(drawer, "textbbox"):
+        bbox = drawer.textbbox((0, 0), text, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+    else:
+        text_w, text_h = drawer.textsize(text, font=font)
 
-def createPNG(ID, output_path):
-    bc_type = 'Code128' 
-    options = dict(module_height=10, quiet_zone=5,font_size=5,text_distance=1,background='white',foreground='black',center_text=False, format='PNG')    
-    BC = barcode.get_barcode_class(bc_type)
-    BC(str(ID), writer=ImageWriter()).save(output_path, options)
+    pad_y = max(6, int(font_size * 0.4))
+    pad_x = max(4, int(font_size * 0.2))
+    caption_height = text_h + pad_y * 2
 
-def createQRAAS(ID, output_path):
-    qrclass = QRPrint.QRPrint()
-    qrclass.makeLabelAAS(ID, output_path + ".png")
+    new_height = image.height + caption_height
+    output = Image.new("RGB", (image.width, new_height), "white")
+    output.paste(image, (0, 0))
 
+    draw = ImageDraw.Draw(output)
+    text_x = max(pad_x, (image.width - text_w) // 2)
+    text_y = image.height + pad_y
+    draw.text((text_x, text_y), text, fill="black", font=font)
+    return output
 
-def createQR(ID, output_path):
-    qrclass = QRPrint.QRPrint()
-    qrclass.makeLabelQR(ID, output_path + ".png")
+def create_qr_aas(value: str, output_stem: Path):
+    qr = QRPrint.QRPrint()
+    qr.makeLabelAAS(value, str(output_stem) + ".png")
 
+# --- constants for spacing ---
+TOP_PAD = 8
+LINE_GAP = 8
+BOTTOM_PAD = 8
+MAX_LABEL_WIDTH = 696  # QL-700 62mm
 
+def create_label(barcode_items, text_items, qr_items, output_path: Path):
+    log("Composing label image...")
 
-def create_formatted_label(barcode_list, text_list, QR_list, output_path):
-    print("Creating label image...")
-    
+    # load images
+    barcode_imgs, qr_imgs = [], []
+    max_barcode_w = 0
+    max_qr_w = 0
+
+    for it in barcode_items:
+        img = Image.open(f"{it['imgPath']}.png")
+        barcode_imgs.append(img)
+        max_barcode_w = max(max_barcode_w, img.width)
+
+    for it in qr_items:
+        img = Image.open(f"{it['imgPath']}.png")
+        img = overlay_text_on_qr(img, QR_OVERLAY_TEXT)
+        qr_imgs.append(img)
+        max_qr_w = max(max_qr_w, img.width)
+
+    label_w = max(500, max_barcode_w, max_qr_w)
+    label_w = min(label_w, MAX_LABEL_WIDTH)
+
+    # fonts
     try:
-        # Try to Load the barcode image and find label size
-        barcode_images = []
-        barcode_width = 500
-        labelQR_width = 500
-        barcode_height = 0
-        QR_height = 0
-        QR_images = []
-        if len(QR_list) > 0:
-            for item in QR_list:
-                QR_images.append(Image.open(f"{item['imgPath']}.png"))
-            labelQR_width = max([image.width for image in QR_images])  
-            QR_height = max([image.height for image in QR_images])   
-        
-        if len(barcode_list) > 0:
-            for item in barcode_list:
-                barcode_images.append(Image.open(f"{item['imgPath']}.png"))
-            barcode_width = max([image.width for image in barcode_images])  
-            barcode_height = max([image.height for image in barcode_images])   
+        key_font = ImageFont.truetype(str(FONT_PATH), max(12, int(label_w / 10)))
+        val_font = ImageFont.truetype(str(FONT_PATH), max(10, int(label_w / 18)))
+    except Exception:
+        key_font = ImageFont.load_default()
+        val_font = ImageFont.load_default()
 
-        # Assuming the example label dimensions based on the barcode size and the provided sample
-        label_width = max(barcode_width, labelQR_width)
-        if labelQR_width > barcode_width and barcode_images:
-            label_width = labelQR_width
-            scale = int(labelQR_width/barcode_width)
-            for i in range(len(barcode_images)):
-                label_width = labelQR_width
-                widthNew = barcode_images[i].width*scale
-                hightNew = barcode_images[i].height*scale
-                imageResize = barcode_images[i].resize((widthNew, hightNew))
-                barcode_images[i] = imageResize
-            barcode_height = max([image.height for image in barcode_images]) 
+    # rough height estimate (we'll crop later anyway)
+    def estimate_text_height():
+        total = 0
+        line_height = max(1, int(val_font.size * 1.2))
+        for item in text_items:
+            key = str(item.get("labelKey", "") or "").strip()
+            val = str(item.get("labelValue", "") or "").strip()
+            if not key and not val:
+                continue
+            if key:
+                total += key_font.size
+            if val:
+                lines = val.splitlines() or [val]
+                total += line_height * len(lines)
+            if key or val:
+                total += LINE_GAP
+        return total
+
+    text_block_h = estimate_text_height()
+    est_h = text_block_h + sum(img.height + LINE_GAP for img in barcode_imgs + qr_imgs) + TOP_PAD + BOTTOM_PAD
+    est_h = max(est_h, 200)
+
+    # make canvas
+    label = Image.new("RGB", (label_w, est_h), "white")
+    draw = ImageDraw.Draw(label)
+
+    # render
+    y = TOP_PAD
+    line_height = max(1, int(val_font.size * 1.2))
+
+    for t in text_items:
+        key = str(t.get("labelKey", "") or "").strip()
+        val = str(t.get("labelValue", "") or "").strip()
+        if not key and not val:
+            continue
+        if key:
+            draw.text((10, y), key, fill="black", font=key_font)
+            y += key_font.size
+        if val:
+            lines = val.splitlines() or [val]
+            for line in lines:
+                draw.text((10, y), line, fill="black", font=val_font)
+                y += line_height
+        if key or val:
+            y += LINE_GAP
+
+    def paste_center(img):
+        nonlocal y
+        # scale down if wider than tape
+        if img.width > MAX_LABEL_WIDTH:
+            r = MAX_LABEL_WIDTH / img.width
+            img = img.resize((MAX_LABEL_WIDTH, max(1, int(img.height * r))), Image.ANTIALIAS)
+        x = (label_w - img.width) // 2
+        label.paste(img, (x, y))
+        y += img.height + LINE_GAP
+
+    for img in barcode_imgs:
+        paste_center(img)
+    for img in qr_imgs:
+        paste_center(img)
+
+    # hard crop to used content height
+    used_h = min(y - LINE_GAP + BOTTOM_PAD, label.height)
+    label = label.crop((0, 0, label_w, used_h))
+
+    # final safety: ensure width <= MAX_LABEL_WIDTH
+    if label.width > MAX_LABEL_WIDTH:
+        r = MAX_LABEL_WIDTH / label.width
+        label = label.resize((MAX_LABEL_WIDTH, max(1, int(label.height * r))), Image.ANTIALIAS)
+
+    label.save(output_path)
+    log(f"Label saved: {output_path} (w={label.width}, h={label.height})")
+
+def send_to_printer(image_path: Path):
+    """
+    Convert PNG to Brother raster and send to printer.
+    We don't pass backend=...; usb:// implies pyusb in your install.
+    """
+    printer = BrotherQLRaster(MODEL)
+    log(f"Converting for model={MODEL}, tape={TAPE}, id={IDENTIFIER}")
+    instructions = brother_ql.brother_ql_create.convert(
+        printer,
+        [str(image_path)],
+        TAPE,
+        dither=True,
+        cut=True,          # request cut after each label
+        rotate='auto'      # auto-rotate if needed
+    )
+    send(instructions, IDENTIFIER)
+    log("Print sent")
 
 
-        print(f'label width: {labelQR_width} px')
-        font_size =  int(label_width/10) 
-        print(f'font size: {font_size} px')
-        label_height = int((barcode_height * len(barcode_list)) + (QR_height * len(QR_list)) + font_size*2*len(text_list))
-        print(f'label (w x h): {label_width} x {label_height} px')
+# -------------------------
+# Payload handling
+# -------------------------
+def process_payload(payload: dict):
+    ensure_dirs()
 
-        # Create a new image with white background
-        label_image = Image.new('RGB', (label_width, label_height), 'white')
-        
-        # Paste the barcode onto the new image, centered on x and stacked on y Upper left is(0,0)
-        baseline_y = label_height
-        if len(barcode_images) > 0:
-            for i in range(len(barcode_images)):
-                barcode_x = int((label_width - barcode_images[i].width) // 2)
-                barcode_y = baseline_y - barcode_images[i].height
-                baseline_y = barcode_y
-                label_image.paste(barcode_images[i], (barcode_x, barcode_y))
-        if len(QR_images) > 0:
-            for i in range(len(QR_images)):
-                barcode_x = int((label_width - QR_images[i].width))
-                barcode_y = baseline_y - QR_images[i].height
-                baseline_y = barcode_y
-                label_image.paste(QR_images[i], (barcode_x, barcode_y))
+    items = payload.get("labelItems", [])
+    qty = int(payload.get("qty", 1))
 
-        # Set up the font for the text
-        font_path = "/code/fonts/DejaVuSans-Bold.ttf"  # Adjust this path to your font file
-        
-        key_font = ImageFont.truetype(font_path, font_size)
-        value_font = ImageFont.truetype(font_path, int(font_size * 0.5))
-        
-        # Initialize ImageDraw to add text to the image
-        draw = ImageDraw.Draw(label_image)
+    barcode_items, text_items, qr_items = [], [], []
 
-        # Add text to the image
-        if len(text_list) > 0:
-            for i in range(len(text_list)):
-                text_key_position = (10, int(font_size*i+1.5))
-                text_value_position = (10, int(font_size*i*1.5 + font_size*1.2))
-                draw.text(text_key_position, f"{text_list[i]['labelKey']}", fill="black", font=key_font)
-                draw.text(text_value_position, f"{text_list[i]['labelValue']}", fill="black", font=value_font)
+    for it in items:
+        ltype = it.get("labelType")
+        key = str(it.get("labelKey", ""))
+        val = str(it.get("labelValue", ""))
 
+        if ltype == "barcode":
+            stem = BARCODES_DIR / f"barcode-{key}-{val}"
+            create_barcode(val, stem)
+            it["imgPath"] = str(stem)
+            barcode_items.append(it)
+            log(f"Barcode created: {stem}.png")
 
-        # Save the new image
-        label_image.save(output_path)
-        print( "Label image created successfully.")
-    except Exception as e:
-        print( str(e))
+        elif ltype == "QR":
+            stem = QR_DIR / f"QR-{key}"
+            create_qr_text(val, stem)
+            it["imgPath"] = str(stem)
+            qr_items.append(it)
+            log(f"QR created: {stem}.png")
 
-# To use the function, you would call it with the barcode image path and the information you want on the label:
-# create_formatted_label(barcode_path, date_packed, customer, product, pallet_no, output_path)
+        elif ltype == "QRAAS":
+            stem = QR_DIR / f"QR-{key}"
+            create_qr_aas(val, stem)
+            it["imgPath"] = str(stem)
+            qr_items.append(it)
+            log(f"AAS QR created: {stem}.png")
 
+        elif ltype == "text":
+            text_items.append(it)
+            log(f"Text added: {key or '[text]'} -> {val}")
 
+    label_png = OUTPUT_DIR / "label.png"
+    create_label(barcode_items, text_items, qr_items, label_png)
 
+    for i in range(qty):
+        log(f"Printing copy {i+1}/{qty}")
+        send_to_printer(label_png)
+        time.sleep(0.4)
+
+# -------------------------
+# Main
+# -------------------------
+def read_payload_arg_or_stdin():
+    if len(sys.argv) >= 2 and sys.argv[1].strip():
+        return sys.argv[1]
+    if not sys.stdin.isatty():
+        return sys.stdin.read()
+    print("Usage: python3 print.py '<json_payload>'", file=sys.stderr)
+    sys.exit(1)
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 myscript.py payload_data")
-        sys.exit(1)
     try:
-        payload_data = sys.argv[1]
-        payload_dict = json.loads(payload_data)
-        print("Received payload data:")
-        print(f'Payload: {payload_dict}')
-        labelItems = payload_dict['labelItems']
-        print(labelItems)
-        barcode_list = []
-        text_list = []
-        QR_list =[]
-        for item in labelItems:
-            print (item)
-            if item['labelType'] == 'barcode':
-                image_location = f'/code/barcodes/barcode-{item["labelKey"]}-{item["labelValue"]}'
-                createPNG(item['labelValue'],image_location)
-                item['imgPath'] = image_location
-                barcode_list.append(item)
-                print("barcode saved")
-            elif item['labelType'] == 'text':
-                text_list.append(item)
-                print("text  item saved")
-            elif item['labelType'] == 'QR':
-                image_location = f'/code/QR/QR-{item["labelKey"]}'
-                createQR(item['labelValue'], image_location)
-                item['imgPath'] = image_location
-                QR_list.append(item)
-                print("AAS QR saved")
-            elif item['labelType'] == 'QRAAS':
-                print("ASS triggered")
-                image_location = f'/code/QR/QR-{item["labelKey"]}'
-                createQRAAS(item['labelValue'], image_location)
-                item['imgPath'] = image_location
-                QR_list.append(item)
-                print("QR saved")
-
-
-        create_formatted_label(barcode_list, text_list, QR_list, '/code/output/label.png')
-        # Print current directory
-        current_directory = os.getcwd()
-        print("Current Directory:", current_directory)
-
-        # List all files in the directory
-        files = os.listdir(current_directory)
-        print("Files in the Directory:")
-        for file in files:
-            print(file)
-        sendToPrinter('/code/output/label.png')
-        try:
-            if payload_dict['qty']:
-                for i in range(int(payload_dict['qty'])):
-                    sendToPrinter('/code/output/label.png')
-                    time.sleep(0.5)
-            else:
-                sendToPrinter('/code/output/label.png')
-                print("done")
-        except:
-            print("Error printing but label made")
-
-
+        raw = read_payload_arg_or_stdin()
+        payload = json.loads(raw)
+        log(f"Payload received: {str(payload)[:400]}")
+        process_payload(payload)
     except json.JSONDecodeError as e:
-        print("Error parsing JSON:", e)
-    #sendToPrinter('./printer/code/output/label.png')
-
+        log(f"JSON error: {e}")
+        sys.exit(2)
+    except Exception as e:
+        log(f"Error: {e}")
+        sys.exit(3)
 
 if __name__ == "__main__":
     main()

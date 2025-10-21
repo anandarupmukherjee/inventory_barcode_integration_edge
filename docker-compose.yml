@@ -1,47 +1,64 @@
-version: '2'
+version: "3.8"
 
 services:
-    user-input-dc:
-        extends:
-            file: user_input_dc/app.yml
-            service: app
-        networks:
-            internal: 
-                aliases: 
-                    - user-input-dc.docker.local
-        logging: 
-            driver: syslog
-            options: 
-                tag: docker-user-input-dc
-    # mqtt_broker:
-    #         extends:
-    #             file: mqtt_broker/app.yml
-    #             service: app
-    #         networks:
-    #             internal:
-    #                 aliases:
-    #                     - mqtt.docker.local
-    #         logging:
-    #                 driver: syslog
-    #                 options:
-    #                         tag: docker-mqtt-broker
-    #         restart: unless-stopped
-    printer:
-        extends:
-            file: printer/app.yml
-            service: app
-        networks:
-            internal:
-                aliases:
-                    - printer.docker.local
-        logging:
-            driver: syslog
-            options:
-                tag: docker-printer
-        restart: unless-stopped    
+  mqtt_bridge:
+    build:
+      context: ./mqtt_bridge
+      dockerfile: Dockerfile
+    depends_on:
+      - mqtt_broker
+    environment:
+      REMOTE_MQTT_HOST: broker.hivemq.com
+      REMOTE_MQTT_PORT: "1883"
+      REMOTE_MQTT_TOPIC: lobby/lift/packages
+      LOCAL_MQTT_HOST: mqtt_broker
+      LOCAL_MQTT_PORT: "1883"
+      LOCAL_MQTT_TOPIC: lobby/lift/packages
+    networks:
+      internal:
+        aliases: [mqtt-bridge.docker.local]
+    logging:
+      driver: syslog
+      options: { tag: docker-mqtt-bridge }
+    restart: unless-stopped
+
+  mqtt_broker:
+    extends:
+      file: mqtt_broker/app.yml
+      service: app
+    networks:
+      internal:
+        aliases: [mqtt.docker.local]
+    logging:
+      driver: syslog
+      options: { tag: docker-mqtt-broker }
+    restart: unless-stopped
+
+  mqtt_printer_listener:
+    build:
+      context: ./mqtt_printer_listener
+      dockerfile: Dockerfile
+    depends_on:
+      - mqtt_broker
+    networks:
+      internal:
+        aliases: [printer-listener.docker.local]
+    volumes:
+      - ./printer/code:/code
+    devices:
+      - "/dev/bus/usb:/dev/bus/usb"
+    environment:
+      MQTT_HOST: mqtt_broker
+      MQTT_PORT: "1883"
+      MQTT_TOPIC: lobby/lift/packages
+      PRINTER_BACKEND: pyusb
+      PRINTER_IDENTIFIER: "usb://0x04f9:0x2042"
+    logging:
+      driver: syslog
+      options: { tag: docker-printer-listener }
+    restart: unless-stopped
+
 networks:
-        internal:
-            name: ManualLab
-            external: true
-
-
+  internal:
+    name: ManualLab
+    driver: bridge

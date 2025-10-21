@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.log
+.DS_Store
+
+# Generated assets
+printer/code/barcodes/
+printer/code/output/
+printer/code/QR/
+
+# Runtime state
+printer/data/
+
+# Legacy UI bundle (handled elsewhere)
+user_input_dc/

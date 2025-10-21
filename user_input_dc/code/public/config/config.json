@@ -1,9 +1,0 @@
-{
-  "id":"Printer 1",
-  "mqtt":{
-    "host":"",
-    "port":9001,
-    "prefix":[]
-  }
-}
-
