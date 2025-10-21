@@ -13,3 +13,7 @@ printer/data/
 
 # Legacy UI bundle (handled elsewhere)
 user_input_dc/
+
+# LLM stack assets
+llm_inventory_agent/models/
+!llm_inventory_agent/models/.gitkeep

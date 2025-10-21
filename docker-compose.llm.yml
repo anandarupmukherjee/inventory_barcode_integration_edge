@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  llm_inventory_agent:
+    build:
+      context: ./llm_inventory_agent
+      dockerfile: Dockerfile
+    environment:
+      LOCAL_MQTT_HOST: mqtt_broker
+      LOCAL_MQTT_PORT: 1883
+      LOCAL_MQTT_TOPIC: lobby/lift/packages
+      REMOTE_MQTT_HOST: broker.hivemq.com
+      REMOTE_MQTT_PORT: 1883
+      REMOTE_MQTT_TOPIC: lift/lobby/status
+      IMS_API_BASE: https://ims.example.com
+      IMS_TIMEOUT_SECONDS: 10
+      LLM_MODEL_PATH: /models/tinyllama.gguf
+      LLM_CONTEXT_SIZE: 1024
+      LLM_MAX_TOKENS: 64
+      LLM_TEMPERATURE: 0.0
+    volumes:
+      - ./llm_inventory_agent/models:/models:ro
+    networks:
+      manuallab:
+        aliases:
+          - llm-agent.docker.local
+    restart: unless-stopped
+
+networks:
+  manuallab:
+    external: true
+    name: ManualLab

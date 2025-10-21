@@ -73,6 +73,32 @@ builds a label with the product name, optional note, timestamp, and a QR code.
 - `QRPrint.makeLabelAAS` supports large payloads by chunking/compressing
   before QR encoding.
 
+## Optional LLM Inventory Agent Stack
+
+A companion stack defined in `docker-compose.llm.yml` runs a lightweight
+LLM-backed agent on the Raspberry Pi. The agent subscribes to the internal
+Mosquitto broker (`ManualLab` network), extracts a product name from incoming
+payloads, queries an Inventory Management System, and publishes the result to
+HiveMQ on `lift/lobby/status`:
+
+- Place a quantised GGUF model in `llm_inventory_agent/models/` (for example
+  [`TinyLlama-1.1B-chat.gguf`](https://huggingface.co/jzhang38/TinyLlama-1.1B-Chat)).
+  The filename should match the `LLM_MODEL_PATH` environment variable.
+- Adjust the IMS endpoint and credentials via `IMS_API_BASE`, `IMS_API_KEY`,
+  and `IMS_AUTH_TOKEN` in `docker-compose.llm.yml`.
+- Optional MQTT credentials are exposed through `LOCAL_MQTT_USERNAME` /
+  `LOCAL_MQTT_PASSWORD` and `REMOTE_MQTT_USERNAME` / `REMOTE_MQTT_PASSWORD`.
+
+Launch the agent after the main stack is running:
+
+```bash
+docker compose -f docker-compose.llm.yml up -d
+```
+
+The agent publishes JSON status payloads of the form
+`{"product": "Widget", "exists": true, "items": [...]}` to
+`lift/lobby/status` on the HiveMQ broker.
+
 ## Maintenance
 
 - To stop the stack run `./stop.sh`.
