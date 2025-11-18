@@ -8,9 +8,9 @@ from typing import Any, Dict
 
 import paho.mqtt.client as mqtt
 
-BROKER = os.environ.get("MQTT_HOST", "mqtt_broker")
+BROKER = os.environ.get("MQTT_HOST", "broker.hivemq.com")
 PORT = int(os.environ.get("MQTT_PORT", "1883"))
-TOPIC = os.environ.get("MQTT_TOPIC", "lobby/lift/packages")
+TOPIC = os.environ.get("MQTT_TOPIC", "lift/lobby/packages/print")
 
 
 def on_connect(client, _userdata, _flags, rc):
@@ -42,6 +42,27 @@ def build_label_payload(raw: str) -> Dict[str, Any]:
         default="",
     )
 
+    product_code = _first_non_empty(
+        data,
+        keys=("product_code", "productCode", "barcode", "code"),
+        default="",
+    )
+
+    product_obj = data.get("product") if isinstance(data.get("product"), dict) else {}
+    if isinstance(product_obj, dict):
+        if not product:
+            product = _first_non_empty(
+                product_obj,
+                keys=("name", "product_name", "productName", "title"),
+                default="",
+            )
+        if not product_code:
+            product_code = _first_non_empty(
+                product_obj,
+                keys=("product_code", "productCode", "barcode_value", "qrcode_value", "code"),
+                default="",
+            )
+
     combined_text = str(data.get("combinedText", "") or "").strip()
     if combined_text:
         product = combined_text
@@ -70,11 +91,16 @@ def build_label_payload(raw: str) -> Dict[str, Any]:
     if not timestamp:
         timestamp = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
-
-    qr_value = (
-        _first_non_empty(data, keys=("qr", "qrValue", "qr_code", "code"))
-        or str(uuid.uuid4())
-    )
+    qr_lines = []
+    if product:
+        qr_lines.append(f"Name: {product}")
+    if product_code:
+        qr_lines.append(f"Code: {product_code}")
+    if timestamp:
+        qr_lines.append(f"Time: {timestamp}")
+    if not qr_lines:
+        qr_lines.append(str(uuid.uuid4()))
+    qr_value = "\n".join(qr_lines)
 
     try:
         qty = max(1, int(data.get("qty", 1)))
@@ -85,6 +111,9 @@ def build_label_payload(raw: str) -> Dict[str, Any]:
 
     if product:
         label_items.append({"labelType": "text", "labelKey": "", "labelValue": product})
+
+    if product_code:
+        label_items.append({"labelType": "text", "labelKey": "Code", "labelValue": product_code})
 
     if note:
         label_items.append({"labelType": "text", "labelKey": "", "labelValue": note})

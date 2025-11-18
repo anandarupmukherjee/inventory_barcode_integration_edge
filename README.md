@@ -16,7 +16,7 @@ architecture for future expansion.
   Cloud) onto the local broker so the printer stack can run offline.
 - **mqtt_broker** – Eclipse Mosquitto with MQTT + WebSocket listeners.
 - **mqtt_printer_listener** – converts messages delivered on
-  `lobby/lift/packages` into ready-to-print labels by calling
+  `lift/lobby/packages/print` into ready-to-print labels by calling
   `printer/code/print.py`.
 - **printer/code** – label rendering and printer control logic (barcodes,
   QR generation, rasterisation, and Brother QL USB output).
@@ -45,7 +45,8 @@ docker compose up -d
 ```
 
 By default the bridge listens to `broker.hivemq.com` on topic
-`lobby/lift/packages`. Edit `docker-compose.yml` to point at your own broker or
+`lobby/lift/packages`, and the printer listener subscribes directly to
+`lift/lobby/packages/print` on the same broker. Edit `docker-compose.yml` to point at your own broker or
 override the environment variables listed below.
 
 ## Environment Variables
@@ -55,8 +56,8 @@ override the environment variables listed below.
 | `mqtt_bridge`           | `REMOTE_MQTT_HOST`    | Remote broker hostname                       |
 |                         | `REMOTE_MQTT_TOPIC`   | Topic to mirror from remote broker           |
 |                         | `LOCAL_MQTT_TOPIC`    | Topic to publish to on the local broker      |
-| `mqtt_printer_listener` | `MQTT_HOST`           | Local broker hostname                        |
-|                         | `MQTT_TOPIC`          | Topic to subscribe to for label payloads     |
+| `mqtt_printer_listener` | `MQTT_HOST`           | Broker hostname (defaults to broker.hivemq.com) |
+|                         | `MQTT_TOPIC`          | Topic to subscribe to for label payloads (defaults to `lift/lobby/packages/print`) |
 |                         | `PRINTER_IDENTIFIER`  | Brother QL USB identifier (e.g. `usb://...`) |
 |                         | `PRINTER_MODEL`       | Brother QL model, defaults to `QL-700`       |
 
@@ -72,32 +73,6 @@ builds a label with the product name, optional note, timestamp, and a QR code.
   if you need a different typeface.
 - `QRPrint.makeLabelAAS` supports large payloads by chunking/compressing
   before QR encoding.
-
-## Optional LLM Inventory Agent Stack
-
-A companion stack defined in `docker-compose.llm.yml` runs a lightweight
-LLM-backed agent on the Raspberry Pi. The agent subscribes to the internal
-Mosquitto broker (`ManualLab` network), extracts a product name from incoming
-payloads, queries an Inventory Management System, and publishes the result to
-HiveMQ on `lift/lobby/status`:
-
-- Place a quantised GGUF model in `llm_inventory_agent/models/` (for example
-  [`TinyLlama-1.1B-chat.gguf`](https://huggingface.co/jzhang38/TinyLlama-1.1B-Chat)).
-  The filename should match the `LLM_MODEL_PATH` environment variable.
-- Adjust the IMS endpoint and credentials via `IMS_API_BASE`, `IMS_API_KEY`,
-  and `IMS_AUTH_TOKEN` in `docker-compose.llm.yml`.
-- Optional MQTT credentials are exposed through `LOCAL_MQTT_USERNAME` /
-  `LOCAL_MQTT_PASSWORD` and `REMOTE_MQTT_USERNAME` / `REMOTE_MQTT_PASSWORD`.
-
-Launch the agent after the main stack is running:
-
-```bash
-docker compose -f docker-compose.llm.yml up -d
-```
-
-The agent publishes JSON status payloads of the form
-`{"product": "Widget", "exists": true, "items": [...]}` to
-`lift/lobby/status` on the HiveMQ broker.
 
 ## Maintenance
 
