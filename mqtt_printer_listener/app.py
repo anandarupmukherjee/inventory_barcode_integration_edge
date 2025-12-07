@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import json
 import os
 import subprocess
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict
 
 import paho.mqtt.client as mqtt
@@ -22,9 +24,92 @@ def on_connect(client, _userdata, _flags, rc):
 def _first_non_empty(data: Dict[str, Any], keys, default="") -> str:
     for key in keys:
         value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                return stripped
+        elif isinstance(value, (int, float)):
+            text = str(value).strip()
+            if text and text.lower() not in {"nan", "inf", "-inf"}:
+                return text
     return default
+
+
+QR_KEYS = ("qrcode_value", "qrCodeValue", "qrcodeValue")
+BARCODE_KEYS = ("product_code", "productCode", "barcode", "barcode_value", "barcodeValue", "code")
+LOT_KEYS = ("lot_number", "lotNumber", "lot", "lotNo", "batch", "batchNumber", "batch_number")
+EXPIRY_KEYS = ("expiry", "expiration", "expiryDate", "expirationDate", "expireDate", "expDate")
+TIMESTAMP_KEYS = ("timestamp", "time", "datetime", "date", "createdAt", "created_at")
+NOTE_KEYS = ("note", "notes", "description", "details", "comment")
+PRODUCT_NAME_KEYS = ("product_name", "productName", "product", "name", "title", "label", "message", "text")
+PRODUCT_OBJ_NAME_KEYS = ("name", "product_name", "productName", "title")
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        if value > 0:
+            try:
+                return datetime.utcfromtimestamp(value)
+            except (ValueError, OSError):
+                return None
+
+    if not isinstance(value, str):
+        return None
+
+    raw = value.strip()
+    if not raw:
+        return None
+
+    iso_candidate = raw.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(iso_candidate)
+    except ValueError:
+        pass
+
+    formats = [
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%d-%m-%Y",
+        "%m/%d/%Y",
+        "%Y%m%d",
+        "%y%m%d",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _normalize_gtin(value: str) -> str:
+    digits = "".join(ch for ch in value if ch.isdigit())
+    if not digits:
+        return ""
+    digits = digits[:14]
+    return digits.zfill(14)
+
+
+def _default_gtin() -> str:
+    random_digits = str(uuid.uuid4().int)
+    random_digits = random_digits[:14]
+    return random_digits.zfill(14)
+
+
+def _build_gs1_code(product_code: str, lot_number: str, expiry: datetime) -> str:
+    gtin = _normalize_gtin(product_code)
+    if not gtin:
+        gtin = _default_gtin()
+
+    lot = (lot_number or "000").strip() or "000"
+    lot = lot.replace(" ", "")
+    lot = lot[:20]
+
+    expiry_str = expiry.strftime("%y%m%d")
+    return f"01{gtin}17{expiry_str}10{lot}"
 
 
 def build_label_payload(raw: str) -> Dict[str, Any]:
@@ -36,32 +121,24 @@ def build_label_payload(raw: str) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("Payload must be a JSON object")
 
-    product = _first_non_empty(
-        data,
-        keys=("product_name", "productName", "product", "name", "title", "label", "message", "text"),
-        default="",
-    )
+    now = datetime.utcnow()
 
-    product_code = _first_non_empty(
-        data,
-        keys=("product_code", "productCode", "barcode", "code"),
-        default="",
-    )
+    product = _first_non_empty(data, keys=PRODUCT_NAME_KEYS, default="")
+
+    qr_code_override = _first_non_empty(data, keys=QR_KEYS, default="")
 
     product_obj = data.get("product") if isinstance(data.get("product"), dict) else {}
     if isinstance(product_obj, dict):
         if not product:
-            product = _first_non_empty(
-                product_obj,
-                keys=("name", "product_name", "productName", "title"),
-                default="",
-            )
-        if not product_code:
-            product_code = _first_non_empty(
-                product_obj,
-                keys=("product_code", "productCode", "barcode_value", "qrcode_value", "code"),
-                default="",
-            )
+            product = _first_non_empty(product_obj, keys=PRODUCT_OBJ_NAME_KEYS, default="")
+        if not qr_code_override:
+            qr_code_override = _first_non_empty(product_obj, keys=QR_KEYS, default="")
+
+    product_code = qr_code_override
+    if not product_code:
+        product_code = _first_non_empty(data, keys=BARCODE_KEYS, default="")
+        if isinstance(product_obj, dict) and not product_code:
+            product_code = _first_non_empty(product_obj, keys=BARCODE_KEYS, default="")
 
     combined_text = str(data.get("combinedText", "") or "").strip()
     if combined_text:
@@ -77,30 +154,26 @@ def build_label_payload(raw: str) -> Dict[str, Any]:
     if not product:
         product = "Package"
 
-    note = _first_non_empty(
-        data,
-        keys=("note", "notes", "description", "details", "comment"),
-        default="",
-    )
+    note = _first_non_empty(data, keys=NOTE_KEYS, default="")
 
-    timestamp = _first_non_empty(
-        data,
-        keys=("timestamp", "time", "datetime", "date", "createdAt", "created_at"),
-        default="",
-    )
+    timestamp = _first_non_empty(data, keys=TIMESTAMP_KEYS, default="")
     if not timestamp:
-        timestamp = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        timestamp = now.isoformat(timespec="seconds") + "Z"
 
-    qr_lines = []
-    if product:
-        qr_lines.append(f"Name: {product}")
-    if product_code:
-        qr_lines.append(f"Code: {product_code}")
-    if timestamp:
-        qr_lines.append(f"Time: {timestamp}")
-    if not qr_lines:
-        qr_lines.append(str(uuid.uuid4()))
-    qr_value = "\n".join(qr_lines)
+    lot_number = _first_non_empty(data, keys=LOT_KEYS, default="")
+    if isinstance(product_obj, dict) and not lot_number:
+        lot_number = _first_non_empty(product_obj, keys=LOT_KEYS, default="")
+    if not lot_number:
+        lot_number = "000"
+
+    expiry_raw = _first_non_empty(data, keys=EXPIRY_KEYS, default="")
+    expiry_dt = _parse_datetime(expiry_raw)
+    if isinstance(product_obj, dict) and not expiry_dt:
+        expiry_dt = _parse_datetime(_first_non_empty(product_obj, keys=EXPIRY_KEYS, default=""))
+    if not expiry_dt:
+        expiry_dt = now + timedelta(days=365 * 3)
+
+    qr_value = _build_gs1_code(product_code or "", lot_number, expiry_dt)
 
     try:
         qty = max(1, int(data.get("qty", 1)))
